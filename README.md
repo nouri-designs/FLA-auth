@@ -23,8 +23,8 @@ A modern React-based fingerprint authentication system that integrates with MFS1
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/Nouri-designs/fingerprint-login-app.git
-cd fingerprint-login-app
+git clone https://github.com/nouri-designs/FLA-auth.git
+cd FLA-auth
 ```
 
 2. Install dependencies:
