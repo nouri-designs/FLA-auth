@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   User, 
   Smartphone, 
@@ -8,6 +8,12 @@ import {
   CheckCircle, 
   Loader2 
 } from 'lucide-react';
+// Import MFS100 MorFinEnroll API
+import { 
+  testMFS100Device, 
+  captureMFS100FingerprintComplete,
+  checkMFS100Device 
+} from '../utils/mfs100-morfinenroll.js';
 
 const FingerprintLogin = () => {
   const [formData, setFormData] = useState({
@@ -20,6 +26,7 @@ const FingerprintLogin = () => {
   const [fingerprintStatus, setFingerprintStatus] = useState('');
   const [deviceConnected, setDeviceConnected] = useState(false);
   const [userInfo, setUserInfo] = useState(null);
+  const emailInputRef = useRef(null);
 
   // Check MFS100 device connection on component mount
   useEffect(() => {
@@ -28,31 +35,53 @@ const FingerprintLogin = () => {
 
   const checkDeviceConnection = async () => {
     try {
-      // MFS100 device check - replace with actual device detection logic
-      const response = await fetch('http://127.0.0.1:11100/DeviceOpen', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        }
-      });
+      setFingerprintStatus('🔍 Connecting to MFS100 via MorFinEnroll service...');
       
-      if (response.ok) {
+      // Use MorFinEnroll API to test MFS100 device (port 8032)
+      const deviceTest = await testMFS100Device();
+      
+      if (deviceTest.success) {
+        console.log('✅ MFS100 Device Test Results:', deviceTest);
         setDeviceConnected(true);
-        setFingerprintStatus('Device connected and ready');
+        setFingerprintStatus(`✅ MFS100 connected via MorFinEnroll service`);
+        
+        // Log device information
+        if (deviceTest.connectedDevices) {
+          console.log('📱 Connected Devices:', deviceTest.connectedDevices);
+        }
+        if (deviceTest.serviceInfo) {
+          console.log('ℹ️ Service Info:', deviceTest.serviceInfo);
+        }
+        
+        return { connected: true, deviceInfo: deviceTest };
       } else {
+        console.log('❌ MFS100 Device Test Failed:', deviceTest);
+        
+        // Try simple device check as fallback
+        const simpleCheck = await checkMFS100Device();
+        if (simpleCheck.httpStatus) {
+          setDeviceConnected(true);
+          setFingerprintStatus('✅ MFS100 service available (limited info)');
+          return { connected: true, limited: true };
+        }
+        
         setDeviceConnected(false);
-        setFingerprintStatus('Please connect MFS100 device');
+        setFingerprintStatus(`❌ MFS100 not available: ${deviceTest.error || deviceTest.details}`);
+        return { connected: false, error: deviceTest };
       }
+      
     } catch (error) {
+      console.error('🔴 MFS100 connection error:', error);
       setDeviceConnected(false);
-      setFingerprintStatus('MFS100 device not detected. Please ensure device is connected.');
+      setFingerprintStatus('❌ MFS100 connection failed - MorFinEnroll service not running on port 8032');
+      return { connected: false, error: error.message };
     }
   };
 
   // Helper: get backend base URL from environment (Vite exposes VITE_ prefixed vars)
   const getBackendBase = () => {
     // fallback to localhost if not set
-    return import.meta.env.VITE_BACKEND_URL || '';
+    return import.meta.env.VITE_API_BASE_URL || '';
   };
 
   // Helper: build absolute URL for backend endpoints
@@ -104,15 +133,15 @@ const FingerprintLogin = () => {
     setError('');
 
     try {
-      // Check if user exists in database
-      const url = buildUrl('/api/auth/check-user');
-      const response = await fetchWithTimeout(url, {
+      // Check if user exists in members table of members-db database
+      const response = await fetchWithTimeout(buildUrl('/check-email'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          emailOrPhone: formData.emailOrPhone
+        body: JSON.stringify({ 
+          email: formData.emailOrPhone.includes('@') ? formData.emailOrPhone : null,
+          emailOrPhone: formData.emailOrPhone 
         })
       }, 10000);
 
@@ -122,13 +151,56 @@ const FingerprintLogin = () => {
       }
 
       const data = await response.json();
+      console.log('Backend response:', data); // Debug log to see what your backend returns
 
-      if (data.userExists) {
-        setUserInfo(data.user);
+      // Strictly determine whether the backend returned a found user.
+      // Accept only a non-empty `data` or `user` object (or explicit flags paired with an actual user object).
+      let userInfoCandidate = null;
+      if (data && typeof data === 'object') {
+        // If data.data is present but only contains the `exists` flag, don't treat it as user info here.
+        if (data.data && typeof data.data === 'object' && data.data.exists !== true && Object.keys(data.data).length > 1) {
+          // data.data has more than just the exists flag
+          userInfoCandidate = data.data;
+        } else if (data.user && typeof data.user === 'object' && (data.user.email || data.user.id || Object.keys(data.user).length > 0)) {
+          userInfoCandidate = data.user;
+        } else if (data.success === true && data.user && typeof data.user === 'object' && (data.user.email || data.user.id || Object.keys(data.user).length > 0)) {
+          userInfoCandidate = data.user;
+        } else if (data.found === true && data.user && typeof data.user === 'object' && (data.user.email || data.user.id || Object.keys(data.user).length > 0)) {
+          userInfoCandidate = data.user;
+        }
+      }
+
+      // New: Accept MRIMS shape where `data.data.exists === true` as a valid found user.
+      if (!userInfoCandidate && data && data.data && typeof data.data === 'object' && data.data.exists === true) {
+        // create a minimal user info object from the provided emailOrPhone
+        userInfoCandidate = { email: formData.emailOrPhone, name: formData.emailOrPhone, id: null };
+      }
+
+      if (userInfoCandidate) {
+        // Clear any previous error messages
+        setError('');
+        setUserInfo(userInfoCandidate);
         setCurrentStep(2);
-        setSuccess('User found! Please scan your fingerprint to continue.');
+        setSuccess(`✅ Email verified! Welcome ${userInfoCandidate.name || userInfoCandidate.email || formData.emailOrPhone}! Please scan your fingerprint to complete authentication.`);
+
+        // Check device connection when moving to fingerprint step
+        await checkDeviceConnection();
       } else {
-        setError('User not found. Please check your email/phone number or register first.');
+        // Do not advance — require explicit user data. Clear and focus the input so user must re-enter.
+        setSuccess('');
+        setUserInfo(null);
+        setCurrentStep(1);
+        const errMsg = data && data.message ? data.message : 'User not found in our database. Please enter your registered email or phone.';
+        setError(errMsg);
+
+        // Clear the input and focus it so user must re-enter their email/phone
+        setFormData({ emailOrPhone: '' });
+        // focus after state update
+        setTimeout(() => {
+          if (emailInputRef && emailInputRef.current) {
+            try { emailInputRef.current.focus(); } catch (e) { /* ignore focus errors */ }
+          }
+        }, 50);
       }
     } catch (error) {
       setError('Connection error. Please try again.');
@@ -139,118 +211,154 @@ const FingerprintLogin = () => {
 
   const captureFingerprintData = async () => {
     try {
-      setFingerprintStatus('Please place your finger on the scanner...');
+      setFingerprintStatus('👆 Place your finger firmly on the MFS100 scanner...');
       
-      // MFS100 fingerprint capture
-      const captureResponse = await fetch('http://127.0.0.1:11100/CaptureFingerPrint', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          Timeout: 10000,
-          Quality: 60
-        })
-      });
-
-      const captureResult = await captureResponse.json();
-
-      if (captureResult.ErrorCode === 0) {
-        // Normalize BitmapData to a base64 string when possible
-        let template = captureResult.BitmapData;
-        try {
-          if (template && typeof template !== 'string') {
-            // If it's an array-like of bytes
-            if (Array.isArray(template) || template instanceof Uint8Array) {
-              template = btoa(String.fromCharCode(...template));
-            } else if (template.data && Array.isArray(template.data)) {
-              // some libs return { data: [...] }
-              template = btoa(String.fromCharCode(...template.data));
-            }
-          }
-        } catch (e) {
-          // conversion failed, leave template as-is
+      // Use MorFinEnroll API for fingerprint capture
+      const captureOptions = {
+        timeout: 20000,        // 20 seconds timeout
+        slap: false,          // Single finger capture
+        fingerPosition: 0,     // Any finger position
+        quality: 60           // NFIQ quality threshold (60%)
+      };
+      
+      console.log('🔄 Starting MFS100 fingerprint capture via MorFinEnroll...');
+      setFingerprintStatus('📡 Connecting to MFS100 scanner...');
+      
+      // Perform complete fingerprint capture workflow
+      const captureResult = await captureMFS100FingerprintComplete(captureOptions);
+      
+      if (captureResult.success) {
+        console.log('✅ MFS100 Fingerprint Capture Successful!');
+        console.log('📊 Capture Data:', captureResult.captureData);
+        
+        const { captureData, imageData, deviceInfo } = captureResult;
+        
+        // Extract quality and template information
+        let quality = 'Unknown';
+        let template = null;
+        
+        if (captureData) {
+          // Extract quality score and template from capture data
+          quality = captureData.Quality || captureData.NFIQ_Quality || 'Unknown';
+          template = captureData.Template || captureData.BiometricData || JSON.stringify(captureData);
+          
+          console.log('📊 Fingerprint Quality:', quality);
+          console.log('🔢 Template Length:', template ? template.length : 'N/A');
         }
+        
+        setFingerprintStatus(`✅ Fingerprint captured successfully! Quality: ${quality}`);
 
         return {
-          template,
-          quality: captureResult.Quality
+          success: true,
+          template: template,
+          captureData: captureData,
+          imageData: imageData,
+          quality: quality,
+          deviceInfo: deviceInfo?.deviceInfo || 'MFS100-MorFinEnroll',
+          endpoint: 'MorFinEnroll:8032'
         };
+
       } else {
-        throw new Error(captureResult.ErrorDescription || 'Fingerprint capture failed');
+        console.error('❌ MFS100 Fingerprint Capture Failed:', captureResult);
+        const errorMsg = captureResult.details || captureResult.error || 'Unknown capture error';
+        setFingerprintStatus(`❌ Capture failed: ${errorMsg}`);
+        
+        // Check if it's a service connection issue
+        if (errorMsg.includes('8032') || errorMsg.includes('service')) {
+          throw new Error('❌ MorFinEnroll service not running. Please ensure:\n• MFS100 MorFinEnroll Client Service is installed\n• Service is running on port 8032\n• Device is connected and recognized');
+        }
+        
+        throw new Error(`❌ Fingerprint capture failed: ${errorMsg}`);
       }
+
     } catch (error) {
-      throw new Error('Failed to capture fingerprint: ' + error.message);
+      console.error('❌ Fingerprint capture error:', error);
+      setFingerprintStatus(`❌ Capture error: ${error.message}`);
+      
+      return {
+        success: false,
+        error: error.message,
+        template: null
+      };
     }
   };
 
   const handleFingerprintScan = async () => {
-    if (!deviceConnected) {
-      setError('MFS100 device not connected. Please check your device connection.');
-      return;
-    }
-
     setIsLoading(true);
     setError('');
-    setFingerprintStatus('Initializing fingerprint scanner...');
+    setSuccess('');
+    setFingerprintStatus('🔄 Initializing MFS100 scanner...');
 
     try {
       // Capture fingerprint from MFS100 device
-  const fingerprintData = await captureFingerprintData();
+      const fingerprintResult = await captureFingerprintData();
       
-      if (!fingerprintData.template) {
-        throw new Error('No fingerprint data captured');
+      // Check if capture was successful
+      if (!fingerprintResult.success) {
+        throw new Error(fingerprintResult.error || 'Fingerprint capture failed');
+      }
+      
+      if (!fingerprintResult.template) {
+        throw new Error('No fingerprint template received from scanner');
       }
 
-      setFingerprintStatus('Verifying fingerprint...');
+      console.log('✅ Fingerprint captured, quality:', fingerprintResult.quality);
+      setFingerprintStatus('🔍 Verifying with MRIMS database...');
 
-      // Prepare payload: ensure template is base64 string (if binary passed)
-      let template = fingerprintData.template;
-      if (template && template instanceof Uint8Array) {
-        // convert to base64
-        template = btoa(String.fromCharCode(...template));
-      }
-
-      // Send fingerprint data to backend for verification (remote backend on other PC)
-      const verifyUrl = buildUrl('/api/verify-fingerprint');
-      const verificationResponse = await fetchWithTimeout(verifyUrl, {
+      // Send fingerprint data to MRIMS backend for verification
+      const response = await fetchWithTimeout(buildUrl('/verify-fingerprint'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
+          userId: userInfo.id || userInfo.user_id,
+          email: userInfo.email,
           emailOrPhone: formData.emailOrPhone,
-          fingerprintTemplate: template,
-          quality: fingerprintData.quality
+          fingerprintTemplate: fingerprintResult.template,
+          pidData: fingerprintResult.pidData,
+          deviceInfo: fingerprintResult.deviceInfo,
+          quality: fingerprintResult.quality
         })
-      }, 20000);
+      }, 30000); // 30 second timeout for verification
 
-      if (!verificationResponse.ok) {
-        const text = await verificationResponse.text().catch(() => '');
-        throw new Error(`Verification server error: ${verificationResponse.status} ${text}`);
+      if (!response.ok) {
+        const text = await response.text().catch(() => '');
+        throw new Error(`MRIMS verification server error: ${response.status} ${text}`);
       }
 
-      const verificationResult = await verificationResponse.json();
+      const verificationResult = await response.json();
+      console.log('MRIMS verification response:', verificationResult);
 
-      if (verificationResult.match) {
-        setSuccess('Fingerprint verified successfully! Redirecting to dashboard...');
-        setFingerprintStatus('Authentication successful');
+      // Handle MRIMS backend response format
+      if ((verificationResult.status === 'success' && verificationResult.match) || 
+          (verificationResult.success && verificationResult.match)) {
         
-        // Store authentication token
-        localStorage.setItem('authToken', verificationResult.token);
-        localStorage.setItem('userId', verificationResult.userId);
+        setSuccess(`🎉 Welcome back, ${userInfo.name || userInfo.email}! Fingerprint verified successfully.`);
+        setFingerprintStatus('✅ Authentication completed successfully');
         
-        // Redirect to dashboard after a short delay
+        // Store authentication data
+        localStorage.setItem('authToken', verificationResult.token || 'authenticated');
+        localStorage.setItem('userId', verificationResult.userId || userInfo.id);
+        localStorage.setItem('authenticated_user', JSON.stringify(userInfo));
+        
+        console.log('✅ User authenticated successfully:', userInfo);
+        
+        // Auto-redirect to dashboard after successful authentication
         setTimeout(() => {
           window.location.href = '/dashboard';
         }, 2000);
+        
       } else {
-        setError(verificationResult.message || 'Fingerprint verification failed. Please try again.');
-        setFingerprintStatus('Verification failed');
+        const errorMsg = verificationResult.message || 'Fingerprint does not match our records. Please try again or contact administrator.';
+        setError(errorMsg);
+        setFingerprintStatus('❌ Verification failed - fingerprint mismatch');
       }
+
     } catch (error) {
-      setError('Fingerprint scanning error: ' + error.message);
-      setFingerprintStatus('Scan failed');
+      console.error('❌ Fingerprint verification error:', error);
+      setError('Fingerprint verification failed: ' + error.message);
+      setFingerprintStatus('❌ Verification failed');
     } finally {
       setIsLoading(false);
     }
@@ -282,8 +390,8 @@ const FingerprintLogin = () => {
           </h1>
           <p className="text-gray-600">
             {currentStep === 1 
-              ? 'Enter your credentials to continue' 
-              : 'Place your finger on the scanner to login'
+              ? 'Enter your registered email or phone number' 
+              : 'Verify your identity with fingerprint scan'
             }
           </p>
         </div>
@@ -317,10 +425,11 @@ const FingerprintLogin = () => {
                   type="text"
                   id="emailOrPhone"
                   name="emailOrPhone"
+                  ref={emailInputRef}
                   value={formData.emailOrPhone}
                   onChange={handleInputChange}
                   onKeyPress={(e) => e.key === 'Enter' && handleEmailPhoneSubmit()}
-                  placeholder="Enter your email or phone number"
+                  placeholder="Enter your registered email or phone number"
                   className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-colors"
                   disabled={isLoading}
                 />
@@ -342,7 +451,7 @@ const FingerprintLogin = () => {
               {isLoading ? (
                 <>
                   <Loader2 className="animate-spin h-5 w-5 mr-2" />
-                  Checking...
+                  Verifying user...
                 </>
               ) : (
                 'Continue'
@@ -397,7 +506,7 @@ const FingerprintLogin = () => {
             <div className="space-y-4">
               <button
                 onClick={handleFingerprintScan}
-                disabled={!deviceConnected || isLoading}
+                disabled={isLoading}
                 className="w-full bg-indigo-600 text-white py-3 px-4 rounded-lg font-medium hover:bg-indigo-700 focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center"
               >
                 {isLoading ? (
@@ -447,7 +556,10 @@ const FingerprintLogin = () => {
         {/* Footer */}
         <div className="mt-8 text-center">
           <p className="text-xs text-gray-500">
-            Secure fingerprint authentication powered by MFS100
+            Secure fingerprint verification powered by MFS100 Mantra
+          </p>
+          <p className="text-xs text-gray-400 mt-1">
+            Compatible with MRIMS enrolled fingerprints
           </p>
         </div>
       </div>

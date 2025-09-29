@@ -27,8 +27,12 @@ const Dashboard = () => {
         return;
       }
 
-      // Fetch user data from backend
-      const response = await fetch(`/api/user/${userId}`, {
+      // Get API base URL from environment
+      const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
+      const apiUrl = API_BASE_URL ? `${API_BASE_URL}/user/${userId}` : `/api/user/${userId}`;
+
+      // Fetch user data from MRIMS backend
+      const response = await fetch(apiUrl, {
         headers: {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json'
@@ -37,21 +41,41 @@ const Dashboard = () => {
 
       if (response.ok) {
         const userData = await response.json();
-        setUser(userData);
+        setUser({
+          ...userData,
+          lastLogin: userData.lastLogin || new Date().toISOString(),
+          fingerprintRegistered: true
+        });
       } else {
-        // Token might be invalid
-        handleLogout();
+        // If API fails, try to use saved user data as fallback
+        const savedUser = localStorage.getItem('authenticated_user');
+        if (savedUser) {
+          const userData = JSON.parse(savedUser);
+          setUser({
+            ...userData,
+            lastLogin: new Date().toISOString(),
+            fingerprintRegistered: true
+          });
+        } else {
+          // Token might be invalid
+          handleLogout();
+        }
       }
     } catch (error) {
       console.error('Error fetching user data:', error);
-      // For demo purposes, set dummy data
-      setUser({
-        name: 'John Doe',
-        email: 'john.doe@example.com',
-        phone: '+1234567890',
-        lastLogin: new Date().toISOString(),
-        fingerprintRegistered: true
-      });
+      
+      // Fallback to saved user data
+      const savedUser = localStorage.getItem('authenticated_user');
+      if (savedUser) {
+        const userData = JSON.parse(savedUser);
+        setUser({
+          ...userData,
+          lastLogin: new Date().toISOString(),
+          fingerprintRegistered: true
+        });
+      } else {
+        handleLogout();
+      }
     } finally {
       setLoading(false);
     }

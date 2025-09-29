@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "description": "Modern React fingerprint authentication frontend with MFS100 support - ready for backend integration",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
